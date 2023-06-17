@@ -34,37 +34,43 @@ class PolicyNetwork(torch.nn.Module):
         self.share1 = torch.nn.Linear(in_features=state_dimension,
                                       out_features=hidden_size)
         init_parameters(self.share1)
-        self.policy1 = torch.nn.Linear(in_features=hidden_size,
+        self.mean1 = torch.nn.Linear(in_features=hidden_size,
                                       out_features=action_dimension)
-        init_parameters(self.policy1)
+        init_parameters(self.mean1)
+
+        self.std1 = torch.nn.Linear(in_features=hidden_size,
+                                      out_features=action_dimension)
+        init_parameters(self.std1)
         
-        self.activation = torch.nn.ReLU()
-        self.softmax = torch.nn.Softmax(dim=-1)
+        self.activation = torch.nn.Tanh()
 
         self.action_log_probs = []
         self.rewards = []
+
+        self.log_std = torch.nn.Parameter(torch.from_numpy(-0.5*np.ones(action_dimension, dtype=np.float32)))
         
     def forward(self, state):
         latent = self.activation(self.share1(state))
-        policy = self.softmax(self.policy1(latent))
+        mean = self.activation(self.mean1(latent))
+        log_std = self.activation(self.std1(latent))
 
-        return policy
+        return mean, log_std
     
-    def eval_step(self, state):
-        policy = self.forward(state)
-        policy_distribution = torch.distributions.Categorical(probs=policy)
+    def step(self, state):
+        mean, log_std = self.forward(state)
+        policy_distribution = torch.distributions.Normal(mean, log_std.exp())
         action = policy_distribution.sample()
-        action_log_probability = policy_distribution.log_prob(action)
+        action_log_probability = policy_distribution.log_prob(action).sum(axis=1)
 
         self.action_log_probs.append(action_log_probability)
 
-
-        return action.cpu().item(), action_log_probability.cpu().item()
+        return action.view(-1).cpu().numpy()
     
     def get_loss(self, discount_factor=0.999, device='cpu'):
-        rewards = torch.tensor(self.rewards)
+        rewards = torch.tensor(self.rewards, dtype=torch.float32, device='cpu')
         reward_to_go = discounted_cumulated_sum(rewards, discount_factor, device)
         reward_to_go = (reward_to_go - reward_to_go.mean()) / reward_to_go.std()
+
         # policy loss = sum of log pi(action_t|state_t) * G_t over t
         policy_losses = [-a * b for a, b in zip(self.action_log_probs, reward_to_go)]
         loss = torch.cat(policy_losses).sum()
@@ -90,7 +96,10 @@ def reinforce(environment,
               writer):
 
     state_dimension = environment.observation_space.shape[0]
-    action_dimension = environment.action_space.n
+    print('Observation Dimension: ', state_dimension)
+    action_dimension = environment.action_space.shape[0]
+    print('Action Dimension: ', action_dimension)
+    action_scale = (environment.action_space.high - environment.action_space.low) / 2.0
 
     network = networkclass(state_dimension=state_dimension,
                            action_dimension=action_dimension,
@@ -116,7 +125,9 @@ def reinforce(environment,
         screens = []
         state, info = environment.reset(seed=0)
         while True:
-            action, action_log_probability = network.eval_step(torch.FloatTensor(state).to(device).unsqueeze(0))
+            with torch.no_grad():
+                action = network.step(torch.from_numpy(state).to(device).unsqueeze(0))
+                action *= action_scale
             next_state, reward, terminated, truncated, info = environment.step(action)
 
             trajectory_reward += reward
@@ -152,7 +163,8 @@ def reinforce(environment,
         trajectory_length = 0
 
         while True:
-            action, action_log_probability = network.eval_step(torch.FloatTensor(state).to(device).unsqueeze(0))
+            action = network.step(torch.from_numpy(state).to(device).unsqueeze(0))
+            action *= action_scale
 
             next_state, reward, terminated, truncated, _ = environment.step(action)
 
@@ -190,7 +202,7 @@ def reinforce(environment,
 
 
 if __name__ == '__main__':
-    game = 'MountainCar-v0'
+    game = 'MountainCarContinuous-v0'
     if not os.path.exists('./runs/'):
         os.makedirs('./runs/')
     writer = SummaryWriter(log_dir=f'./runs/{game}_{time.strftime("%Y%m%d-%H%M%S")}')
@@ -199,12 +211,10 @@ if __name__ == '__main__':
             networkclass=PolicyNetwork,
             hidden_size=32,
             number_of_epoch=1000,
-            learning_rate=0.01,
+            learning_rate=0.001,
             discount_factor=0.999,
             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
             record_path=f'./video/{game}',
             record_name='reinforce',
             record_frame=30,
             writer=writer)
-
-
