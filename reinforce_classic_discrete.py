@@ -31,12 +31,12 @@ class PolicyNetwork(torch.nn.Module):
 
         self.state_dimension = state_dimension
 
-        self.share1 = torch.nn.Linear(in_features=state_dimension,
+        self.fc1 = torch.nn.Linear(in_features=state_dimension,
                                       out_features=hidden_size)
-        init_parameters(self.share1)
-        self.policy1 = torch.nn.Linear(in_features=hidden_size,
+        init_parameters(self.fc1)
+        self.fc2 = torch.nn.Linear(in_features=hidden_size,
                                       out_features=action_dimension)
-        init_parameters(self.policy1)
+        init_parameters(self.fc2)
         
         self.activation = torch.nn.ReLU()
         self.softmax = torch.nn.Softmax(dim=-1)
@@ -45,12 +45,12 @@ class PolicyNetwork(torch.nn.Module):
         self.rewards = []
         
     def forward(self, state):
-        latent = self.activation(self.share1(state))
-        policy = self.softmax(self.policy1(latent))
+        latent = self.activation(self.fc1(state))
+        policy = self.softmax(self.fc2(latent))
 
         return policy
     
-    def eval_step(self, state):
+    def step(self, state):
         policy = self.forward(state)
         policy_distribution = torch.distributions.Categorical(probs=policy)
         action = policy_distribution.sample()
@@ -58,8 +58,7 @@ class PolicyNetwork(torch.nn.Module):
 
         self.action_log_probs.append(action_log_probability)
 
-
-        return action.cpu().item(), action_log_probability.cpu().item()
+        return action.cpu().item()
     
     def get_loss(self, discount_factor=0.999, device='cpu'):
         rewards = torch.as_tensor(self.rewards, dtype=torch.float32, device='cpu')
@@ -116,8 +115,9 @@ def reinforce(environment,
         trajectory_length = 0
         screens = []
         state, info = environment.reset(seed=0)
+        state = torch.from_numpy(state).to(device).unsqueeze(0)
         while True:
-            action, action_log_probability = network.eval_step(torch.from_numpy(state).to(device).unsqueeze(0))
+            action = network.step(state)
             next_state, reward, terminated, truncated, info = environment.step(action)
 
             trajectory_reward += reward
@@ -125,7 +125,7 @@ def reinforce(environment,
 
             screens.append(environment.render())
 
-            state = next_state
+            state = torch.from_numpy(next_state).to(device).unsqueeze(0)
 
             if (terminated or truncated):
                 print(f'trajectory ends with length {trajectory_length}: reward: {trajectory_reward}')
@@ -147,13 +147,14 @@ def reinforce(environment,
 
     for epoch in range(number_of_epoch):
 
-        state, info = environment.reset(seed=0)
+        state, info = environment.reset(seed=epoch)
+        state = torch.from_numpy(state).to(device).unsqueeze(0)
 
         trajectory_reward = 0
         trajectory_length = 0
 
         while True:
-            action, action_log_probability = network.eval_step(torch.from_numpy(state).to(device).unsqueeze(0))
+            action = network.step(state)
 
             next_state, reward, terminated, truncated, _ = environment.step(action)
 
@@ -163,7 +164,7 @@ def reinforce(environment,
             # buffer.store(action_log_probability, reward)
             network.rewards.append(reward)
             
-            state = next_state
+            state = torch.from_numpy(next_state).to(device).unsqueeze(0)
 
             if terminated or truncated:
                 average_trajectory_reward.append(trajectory_reward)
@@ -191,14 +192,14 @@ def reinforce(environment,
 
 
 if __name__ == '__main__':
-    game = 'CartPole-v1'
+    game = 'Acrobot-v1'
     if not os.path.exists('./runs/'):
         os.makedirs('./runs/')
     writer = SummaryWriter(log_dir=f'./runs/{game}_{time.strftime("%Y%m%d-%H%M%S")}')
     torch.manual_seed(24)
     reinforce(environment=gymnasium.make(game, render_mode='rgb_array'),
             networkclass=PolicyNetwork,
-            hidden_size=32,
+            hidden_size=64,
             number_of_epoch=1000,
             learning_rate=0.01,
             discount_factor=0.999,

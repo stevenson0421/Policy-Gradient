@@ -16,7 +16,7 @@ def discounted_cumulated_sum(sequence, discount_factor, device=None):
     if isinstance(sequence, np.ndarray):
         return scipy.signal.lfilter([1], [1, float(-discount_factor)], sequence[::-1], axis=0)[::-1]
     elif isinstance(sequence, torch.Tensor):
-        return torch.as_tensor(np.ascontiguousarray(scipy.signal.lfilter([1], [1, float(-discount_factor)], sequence.detach().cpu().numpy()[::-1], axis=0)[::-1]), dtype=torch.float32, device=device)
+        return torch.from_numpy(np.ascontiguousarray(scipy.signal.lfilter([1], [1, float(-discount_factor)], sequence.detach().cpu().numpy()[::-1], axis=0)[::-1])).to(device)
     else:
         raise TypeError
 
@@ -31,60 +31,114 @@ class PolicyNetwork(torch.nn.Module):
 
         self.state_dimension = state_dimension
 
-        self.share1 = torch.nn.Linear(in_features=state_dimension,
+        self.fc1 = torch.nn.Linear(in_features=state_dimension,
                                       out_features=hidden_size)
-        init_parameters(self.share1)
-        self.mean1 = torch.nn.Linear(in_features=hidden_size,
+        init_parameters(self.fc1)
+        self.fc2 = torch.nn.Linear(in_features=hidden_size,
                                       out_features=action_dimension)
-        init_parameters(self.mean1)
-        self.std1 = torch.nn.Linear(in_features=hidden_size,
-                                      out_features=action_dimension)
-        init_parameters(self.std1)
+        init_parameters(self.fc2)
         
-        self.activation = torch.nn.Tanh()
-
-        self.action_log_probs = []
-        self.rewards = []
+        self.relu = torch.nn.ReLU()
+        self.softmax = torch.nn.Softmax(dim=-1)
         
     def forward(self, state):
-        latent = self.activation(self.share1(state))
-        mean = self.activation(self.mean1(latent))
-        log_std = self.activation(self.std1(latent))
+        latent = self.relu(self.fc1(state))
+        policy = self.softmax(self.fc2(latent))
 
-        return mean, log_std
+        return policy
+
+
+class ValueNetwork(torch.nn.Module):
+    def __init__(self, state_dimension, hidden_size=16):
+        super().__init__()
+
+        def init_parameters(layer, scale=1):
+            torch.nn.init.xavier_normal_(layer.weight, gain=scale)
+            torch.nn.init.zeros_(layer.bias)
+
+        self.state_dimension = state_dimension
+
+        self.fc1 = torch.nn.Linear(in_features=state_dimension,
+                                      out_features=hidden_size)
+        init_parameters(self.fc1)
+        self.fc2 = torch.nn.Linear(in_features=hidden_size,
+                                      out_features=1)
+        init_parameters(self.fc2)
+        
+        self.relu = torch.nn.ReLU()
+
+        self.values = []
+        
+    def forward(self, state):
+        latent = self.relu(self.fc1(state))
+        value = self.relu(self.fc2(latent))
+
+        return value
     
+    
+
+class PolicyValueNetwork(torch.nn.Module):
+    def __init__(self, state_dimension, action_dimension, hidden_size=16):
+        super().__init__()
+
+        self.policy_network = PolicyNetwork(state_dimension=state_dimension,
+                                            action_dimension=action_dimension,
+                                            hidden_size=hidden_size)
+        
+        self.value_network = ValueNetwork(state_dimension=state_dimension,
+                                          hidden_size=hidden_size)
+        
+        self.action_log_probs = []
+        self.rewards = []
+        self.values = []
+
+        self.criterion = torch.nn.MSELoss()
+        
     def step(self, state):
-        mean, log_std = self.forward(state)
-        policy_distribution = torch.distributions.Normal(mean, log_std.exp())
+        policy = self.policy_network.forward(state)
+        policy_distribution = torch.distributions.Categorical(probs=policy)
         action = policy_distribution.sample()
-        action_log_probability = policy_distribution.log_prob(action).sum(axis=1)
+        action_log_probability = policy_distribution.log_prob(action)
 
         self.action_log_probs.append(action_log_probability)
 
-        return action.view(-1).cpu().numpy()
+        value = self.value_network.forward(state)
+
+        self.values.append(value)
+
+        return action.cpu().item()
     
     def get_loss(self, discount_factor=0.999, device='cpu'):
-        rewards = torch.tensor(self.rewards, dtype=torch.float32, device='cpu')
+        rewards = torch.as_tensor(self.rewards, dtype=torch.float32, device='cpu')
         reward_to_go = discounted_cumulated_sum(rewards, discount_factor, device)
-        reward_to_go = (reward_to_go - reward_to_go.mean()) / reward_to_go.std()
 
-        # policy loss = sum of log pi(action_t|state_t) * G_t over t
-        policy_losses = [-a * b for a, b in zip(self.action_log_probs, reward_to_go)]
-        loss = torch.cat(policy_losses).sum()
+        values = torch.cat(self.values).squeeze().double()
 
-        return loss
+        advantages = reward_to_go - values
+        advantages = (advantages - advantages.mean()) / advantages.std()
+
+
+        # policy loss = sum of log pi(action_t|state_t) * (G_t - V_t) over t
+        policy_losses = [-a * (b - c) for a, b, c in zip(self.action_log_probs, reward_to_go, values)]
+        policy_loss = torch.cat(policy_losses).sum()
+        
+        # value loss = 1/|T| * (G_t - V_t)^2
+        value_loss = self.criterion(values, reward_to_go)
+
+        return policy_loss, value_loss
     
     def clear_memory(self):
-        # reset rewards and action buffer
         del self.action_log_probs[:]
         del self.rewards[:]
+        del self.values[:]
 
 
-def reinforce(environment,
+def reinforce_baseline(environment,
               networkclass,
               hidden_size,
               number_of_epoch,
               learning_rate,
+              value_loss_ratio,
               discount_factor,
               device,
               record_path,
@@ -93,10 +147,7 @@ def reinforce(environment,
               writer):
 
     state_dimension = environment.observation_space.shape[0]
-    print('Observation Dimension: ', state_dimension)
-    action_dimension = environment.action_space.shape[0]
-    print('Action Dimension: ', action_dimension)
-    action_scale = (environment.action_space.high - environment.action_space.low) / 2.0
+    action_dimension = environment.action_space.n
 
     network = networkclass(state_dimension=state_dimension,
                            action_dimension=action_dimension,
@@ -107,12 +158,15 @@ def reinforce(environment,
     optimizer = torch.optim.Adam(network.parameters(), learning_rate)
 
     def update(epoch):
-        loss = network.get_loss(discount_factor, device)
+        policy_loss, value_loss = network.get_loss(discount_factor, device)
+        total_loss = policy_loss + value_loss_ratio * value_loss
 
-        writer.add_scalar('Policy Loss', loss, epoch)
+        writer.add_scalar('Policy Loss', policy_loss, epoch)
+        writer.add_scalar('Value Loss', value_loss, epoch)
+        writer.add_scalar('Total Loss', total_loss, epoch)
 
         optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
         optimizer.step()
 
 
@@ -123,9 +177,8 @@ def reinforce(environment,
         state, info = environment.reset(seed=0)
         state = torch.from_numpy(state).to(device).unsqueeze(0)
         while True:
-            with torch.no_grad():
-                action = network.step(state)
-                action *= action_scale
+            action = network.step(state)
+
             next_state, reward, terminated, truncated, info = environment.step(action)
 
             trajectory_reward += reward
@@ -155,7 +208,8 @@ def reinforce(environment,
 
     for epoch in range(number_of_epoch):
 
-        state, info = environment.reset(seed=0)
+        state, info = environment.reset(seed=epoch)
+
         state = torch.from_numpy(state).to(device).unsqueeze(0)
 
         trajectory_reward = 0
@@ -163,9 +217,9 @@ def reinforce(environment,
 
         while True:
             action = network.step(state)
-            action *= action_scale
 
             next_state, reward, terminated, truncated, _ = environment.step(action)
+
 
             trajectory_reward += reward
             trajectory_length += 1
@@ -201,19 +255,22 @@ def reinforce(environment,
 
 
 if __name__ == '__main__':
-    game = 'Pendulum-v1'
+    game = 'Acrobot-v1'
     if not os.path.exists('./runs/'):
         os.makedirs('./runs/')
     writer = SummaryWriter(log_dir=f'./runs/{game}_{time.strftime("%Y%m%d-%H%M%S")}')
     torch.manual_seed(24)
-    reinforce(environment=gymnasium.make(game, render_mode='rgb_array'),
-            networkclass=PolicyNetwork,
+    reinforce_baseline(environment=gymnasium.make(game, render_mode='rgb_array'),
+            networkclass=PolicyValueNetwork,
             hidden_size=32,
             number_of_epoch=1000,
-            learning_rate=0.025,
+            learning_rate=0.01,
+            value_loss_ratio=1,
             discount_factor=0.999,
             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
             record_path=f'./video/{game}',
-            record_name='reinforce',
+            record_name='reinforce_baseline',
             record_frame=30,
             writer=writer)
+
+
