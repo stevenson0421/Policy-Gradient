@@ -71,7 +71,7 @@ class ValueNetwork(torch.nn.Module):
         
     def forward(self, state):
         latent = self.relu(self.fc1(state))
-        value = self.relu(self.fc2(latent))
+        value = self.fc2(latent)
 
         return value
     
@@ -115,11 +115,9 @@ class PolicyValueNetwork(torch.nn.Module):
         values = torch.cat(self.values).squeeze().double()
 
         advantages = reward_to_go - values
-        advantages = (advantages - advantages.mean()) / advantages.std()
-
 
         # policy loss = sum of log pi(action_t|state_t) * (G_t - V_t) over t
-        policy_losses = [-a * (b - c) for a, b, c in zip(self.action_log_probs, reward_to_go, values)]
+        policy_losses = [-a * b for a, b in zip(self.action_log_probs, advantages)]
         policy_loss = torch.cat(policy_losses).sum()
         
         # value loss = 1/|T| * (G_t - V_t)^2
@@ -157,52 +155,6 @@ def reinforce_baseline(environment,
     
     optimizer = torch.optim.Adam(network.parameters(), learning_rate)
 
-    def update(epoch):
-        policy_loss, value_loss = network.get_loss(discount_factor, device)
-        total_loss = policy_loss + value_loss_ratio * value_loss
-
-        writer.add_scalar('Policy Loss', policy_loss, epoch)
-        writer.add_scalar('Value Loss', value_loss, epoch)
-        writer.add_scalar('Total Loss', total_loss, epoch)
-
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
-
-
-    def test():
-        trajectory_reward = 0
-        trajectory_length = 0
-        screens = []
-        state, info = environment.reset(seed=0)
-        state = torch.from_numpy(state).to(device).unsqueeze(0)
-        while True:
-            action = network.step(state)
-
-            next_state, reward, terminated, truncated, info = environment.step(action)
-
-            trajectory_reward += reward
-            trajectory_length += 1
-
-            screens.append(environment.render())
-
-            state = torch.from_numpy(next_state).to(device).unsqueeze(0)
-
-            if (terminated or truncated):
-                print(f'trajectory ends with length {trajectory_length}: reward: {trajectory_reward}')
-
-                if not os.path.exists(record_path):
-                    os.makedirs(record_path)
-                out = cv2.VideoWriter(os.path.join(record_path, f'{record_name}.avi'),cv2.VideoWriter_fourcc(*'DIVX'), record_frame, (screens[0].shape[1], screens[0].shape[0]))
-                for img in screens:
-                    out.write(img)
-                out.release()
-                
-                trajectory_reward = 0
-                trajectory_length = 0
-
-                break
-
     start_time = time.time()
     average_trajectory_reward = deque(maxlen=100)
 
@@ -219,7 +171,6 @@ def reinforce_baseline(environment,
             action = network.step(state)
 
             next_state, reward, terminated, truncated, _ = environment.step(action)
-
 
             trajectory_reward += reward
             trajectory_length += 1
@@ -239,8 +190,22 @@ def reinforce_baseline(environment,
                 trajectory_length = 0
                 
                 break
+    
+        if np.mean(average_trajectory_reward) >= -100:
+            print(f'solved with {epoch} epochs')
+            network.clear_memory()
+            break
 
-        update(epoch)
+        policy_loss, value_loss = network.get_loss(discount_factor, device)
+        total_loss = policy_loss + value_loss_ratio * value_loss
+
+        writer.add_scalar('Policy Loss', policy_loss, epoch)
+        writer.add_scalar('Value Loss', value_loss, epoch)
+        writer.add_scalar('Total Loss', total_loss, epoch)
+
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
 
         network.clear_memory()
 
@@ -249,7 +214,38 @@ def reinforce_baseline(environment,
     print(f'Train Time: {(time.time() - start_time):2f} seconds')
     print(f'Train Score: {np.mean(average_trajectory_reward)}')
 
-    test()
+    trajectory_reward = 0
+    trajectory_length = 0
+    screens = []
+    state, info = environment.reset(seed=0)
+    state = torch.from_numpy(state).to(device).unsqueeze(0)
+    while True:
+        with torch.no_grad():
+            action = network.step(state)
+
+        next_state, reward, terminated, truncated, info = environment.step(action)
+
+        trajectory_reward += reward
+        trajectory_length += 1
+
+        screens.append(environment.render())
+
+        state = torch.from_numpy(next_state).to(device).unsqueeze(0)
+
+        if (terminated or truncated):
+            print(f'trajectory ends with length {trajectory_length}: reward: {trajectory_reward}')
+
+            if not os.path.exists(record_path):
+                os.makedirs(record_path)
+            out = cv2.VideoWriter(os.path.join(record_path, f'{record_name}.avi'),cv2.VideoWriter_fourcc(*'DIVX'), record_frame, (screens[0].shape[1], screens[0].shape[0]))
+            for img in screens:
+                out.write(img)
+            out.release()
+            
+            trajectory_reward = 0
+            trajectory_length = 0
+
+            break
 
     environment.close()
 
@@ -264,7 +260,7 @@ if __name__ == '__main__':
             networkclass=PolicyValueNetwork,
             hidden_size=32,
             number_of_epoch=1000,
-            learning_rate=0.01,
+            learning_rate=0.005,
             value_loss_ratio=1,
             discount_factor=0.999,
             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
@@ -272,5 +268,4 @@ if __name__ == '__main__':
             record_name='reinforce_baseline',
             record_frame=30,
             writer=writer)
-
 

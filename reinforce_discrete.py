@@ -16,7 +16,7 @@ def discounted_cumulated_sum(sequence, discount_factor, device=None):
     if isinstance(sequence, np.ndarray):
         return scipy.signal.lfilter([1], [1, float(-discount_factor)], sequence[::-1], axis=0)[::-1]
     elif isinstance(sequence, torch.Tensor):
-        return torch.as_tensor(np.ascontiguousarray(scipy.signal.lfilter([1], [1, float(-discount_factor)], sequence.detach().cpu().numpy()[::-1], axis=0)[::-1]), dtype=torch.float32, device=device)
+        return torch.from_numpy(np.ascontiguousarray(scipy.signal.lfilter([1], [1, float(-discount_factor)], sequence.detach().cpu().numpy()[::-1], axis=0)[::-1])).to(device)
     else:
         raise TypeError
 
@@ -31,40 +31,37 @@ class PolicyNetwork(torch.nn.Module):
 
         self.state_dimension = state_dimension
 
-        self.share1 = torch.nn.Linear(in_features=state_dimension,
+        self.fc1 = torch.nn.Linear(in_features=state_dimension,
                                       out_features=hidden_size)
-        init_parameters(self.share1)
-        self.mean1 = torch.nn.Linear(in_features=hidden_size,
+        init_parameters(self.fc1)
+        self.fc2 = torch.nn.Linear(in_features=hidden_size,
                                       out_features=action_dimension)
-        init_parameters(self.mean1)
-        self.std1 = torch.nn.Linear(in_features=hidden_size,
-                                      out_features=action_dimension)
-        init_parameters(self.std1)
+        init_parameters(self.fc2)
         
-        self.activation = torch.nn.Tanh()
+        self.activation = torch.nn.ReLU()
+        self.softmax = torch.nn.Softmax(dim=-1)
 
         self.action_log_probs = []
         self.rewards = []
         
     def forward(self, state):
-        latent = self.activation(self.share1(state))
-        mean = self.activation(self.mean1(latent))
-        log_std = self.activation(self.std1(latent))
+        latent = self.activation(self.fc1(state))
+        policy = self.softmax(self.fc2(latent))
 
-        return mean, log_std
+        return policy
     
     def step(self, state):
-        mean, log_std = self.forward(state)
-        policy_distribution = torch.distributions.Normal(mean, log_std.exp())
+        policy = self.forward(state)
+        policy_distribution = torch.distributions.Categorical(probs=policy)
         action = policy_distribution.sample()
-        action_log_probability = policy_distribution.log_prob(action).sum(axis=1)
+        action_log_probability = policy_distribution.log_prob(action)
 
         self.action_log_probs.append(action_log_probability)
 
-        return action.view(-1).cpu().numpy()
+        return action.cpu().item()
     
     def get_loss(self, discount_factor=0.999, device='cpu'):
-        rewards = torch.tensor(self.rewards, dtype=torch.float32, device='cpu')
+        rewards = torch.as_tensor(self.rewards, dtype=torch.float32, device='cpu')
         reward_to_go = discounted_cumulated_sum(rewards, discount_factor, device)
         reward_to_go = (reward_to_go - reward_to_go.mean()) / reward_to_go.std()
 
@@ -93,10 +90,7 @@ def reinforce(environment,
               writer):
 
     state_dimension = environment.observation_space.shape[0]
-    print('Observation Dimension: ', state_dimension)
-    action_dimension = environment.action_space.shape[0]
-    print('Action Dimension: ', action_dimension)
-    action_scale = (environment.action_space.high - environment.action_space.low) / 2.0
+    action_dimension = environment.action_space.n
 
     network = networkclass(state_dimension=state_dimension,
                            action_dimension=action_dimension,
@@ -106,56 +100,12 @@ def reinforce(environment,
     
     optimizer = torch.optim.Adam(network.parameters(), learning_rate)
 
-    def update(epoch):
-        loss = network.get_loss(discount_factor, device)
-
-        writer.add_scalar('Policy Loss', loss, epoch)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-
-    def test():
-        trajectory_reward = 0
-        trajectory_length = 0
-        screens = []
-        state, info = environment.reset(seed=0)
-        state = torch.from_numpy(state).to(device).unsqueeze(0)
-        while True:
-            with torch.no_grad():
-                action = network.step(state)
-                action *= action_scale
-            next_state, reward, terminated, truncated, info = environment.step(action)
-
-            trajectory_reward += reward
-            trajectory_length += 1
-
-            screens.append(environment.render())
-
-            state = torch.from_numpy(next_state).to(device).unsqueeze(0)
-
-            if (terminated or truncated):
-                print(f'trajectory ends with length {trajectory_length}: reward: {trajectory_reward}')
-
-                if not os.path.exists(record_path):
-                    os.makedirs(record_path)
-                out = cv2.VideoWriter(os.path.join(record_path, f'{record_name}.avi'),cv2.VideoWriter_fourcc(*'DIVX'), record_frame, (screens[0].shape[1], screens[0].shape[0]))
-                for img in screens:
-                    out.write(img)
-                out.release()
-                
-                trajectory_reward = 0
-                trajectory_length = 0
-
-                break
-
     start_time = time.time()
     average_trajectory_reward = deque(maxlen=100)
 
     for epoch in range(number_of_epoch):
 
-        state, info = environment.reset(seed=0)
+        state, info = environment.reset(seed=epoch)
         state = torch.from_numpy(state).to(device).unsqueeze(0)
 
         trajectory_reward = 0
@@ -163,7 +113,6 @@ def reinforce(environment,
 
         while True:
             action = network.step(state)
-            action *= action_scale
 
             next_state, reward, terminated, truncated, _ = environment.step(action)
 
@@ -186,7 +135,18 @@ def reinforce(environment,
                 
                 break
 
-        update(epoch)
+        if np.mean(average_trajectory_reward) >= 500:
+            print(f'solved with {epoch} epochs')
+            network.clear_memory()
+            break
+
+        loss = network.get_loss(discount_factor, device)
+
+        writer.add_scalar('Policy Loss', loss, epoch)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
         network.clear_memory()
 
@@ -195,25 +155,56 @@ def reinforce(environment,
     print(f'Train Time: {(time.time() - start_time):2f} seconds')
     print(f'Train Score: {np.mean(average_trajectory_reward)}')
 
-    test()
+    trajectory_reward = 0
+    trajectory_length = 0
+    screens = []
+    state, info = environment.reset(seed=0)
+    state = torch.from_numpy(state).to(device).unsqueeze(0)
+    while True:
+        with torch.no_grad():
+            action = network.step(state)
+        next_state, reward, terminated, truncated, info = environment.step(action)
+
+        trajectory_reward += reward
+        trajectory_length += 1
+
+        screens.append(environment.render())
+
+        state = torch.from_numpy(next_state).to(device).unsqueeze(0)
+
+        if (terminated or truncated):
+            print(f'trajectory ends with length {trajectory_length}: reward: {trajectory_reward}')
+
+            if not os.path.exists(record_path):
+                os.makedirs(record_path)
+            out = cv2.VideoWriter(os.path.join(record_path, f'{record_name}.avi'),cv2.VideoWriter_fourcc(*'DIVX'), record_frame, (screens[0].shape[1], screens[0].shape[0]))
+            for img in screens:
+                out.write(img)
+            out.release()
+            
+            trajectory_reward = 0
+            trajectory_length = 0
+
+            break
 
     environment.close()
 
 
 if __name__ == '__main__':
-    game = 'Pendulum-v1'
+    game = 'CartPole-v1'
     if not os.path.exists('./runs/'):
         os.makedirs('./runs/')
     writer = SummaryWriter(log_dir=f'./runs/{game}_{time.strftime("%Y%m%d-%H%M%S")}')
     torch.manual_seed(24)
     reinforce(environment=gymnasium.make(game, render_mode='rgb_array'),
             networkclass=PolicyNetwork,
-            hidden_size=32,
+            hidden_size=64,
             number_of_epoch=1000,
-            learning_rate=0.025,
+            learning_rate=0.01,
             discount_factor=0.999,
             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
             record_path=f'./video/{game}',
             record_name='reinforce',
             record_frame=30,
             writer=writer)
+
