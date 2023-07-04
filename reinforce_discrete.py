@@ -77,17 +77,19 @@ class PolicyNetwork(torch.nn.Module):
         del self.rewards[:]
 
 
-def reinforce(environment,
-              networkclass,
-              hidden_size,
-              number_of_epoch,
-              learning_rate,
-              discount_factor,
-              device,
-              record_path,
-              record_name,
-              record_frame,
-              writer):
+def reinforce(
+    environment,
+    target_score,
+    networkclass,
+    hidden_size,
+    number_of_epoch,
+    learning_rate,
+    discount_factor,
+    device,
+    record_path,
+    record_name,
+    record_frame,
+    writer):
 
     state_dimension = environment.observation_space.shape[0]
     action_dimension = environment.action_space.n
@@ -135,7 +137,7 @@ def reinforce(environment,
                 
                 break
 
-        if np.mean(average_trajectory_reward) >= 500:
+        if np.mean(average_trajectory_reward) >= target_score:
             print(f'solved with {epoch} epochs')
             network.clear_memory()
             break
@@ -191,16 +193,17 @@ def reinforce(environment,
 
 
 if __name__ == '__main__':
-    game = 'CartPole-v1'
+    game = 'LunarLander-v2'
     if not os.path.exists('./runs/'):
         os.makedirs('./runs/')
     writer = SummaryWriter(log_dir=f'./runs/{game}_{time.strftime("%Y%m%d-%H%M%S")}')
     torch.manual_seed(24)
     reinforce(environment=gymnasium.make(game, render_mode='rgb_array'),
+            target_score=120,
             networkclass=PolicyNetwork,
             hidden_size=64,
-            number_of_epoch=1000,
-            learning_rate=0.01,
+            number_of_epoch=10000,
+            learning_rate=0.0005,
             discount_factor=0.999,
             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
             record_path=f'./video/{game}',

@@ -22,6 +22,15 @@ Implementation of Policy Gradient
 
   - average reward of last 100 episodes reach -100 in 674 epochs
 
+- LunarLander-v2
+
+  - random seed = 24
+  - hidden size = 64
+  - learning rate = 0.0005
+  - discounted factor = 0.999
+
+  - average reward of last 100 episodes reach 120 in 8076 epochs
+
 ## Reinforce with Baseline
 
 - CartPole-v1
@@ -44,7 +53,17 @@ Implementation of Policy Gradient
 
   - average reward of last 100 episodes reach -100 in 619 epochs
 
-## Advantage Actor Critic (A2C)
+- LunarLander-v2
+
+  - random seed = 24
+  - hidden size = 64
+  - learning rate = 0.005
+  - discounted factor = 0.999
+
+  - average reward of last 100 episodes reach 120 in 4892 epochs
+
+
+## Advantage Actor Critic
 
 - CartPole-v1
 
@@ -63,3 +82,12 @@ Implementation of Policy Gradient
   - discounted factor = 0.999
 
   - average reward of last 100 episodes reach -100 in 257 epochs
+
+- LunarLander-v2
+
+  - random seed = 24
+  - hidden size = 64
+  - learning rate = 0.0005
+  - discounted factor = 0.999
+
+  - average reward of last 100 episodes reach 120 in 601 epochs

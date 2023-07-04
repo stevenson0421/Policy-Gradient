@@ -106,19 +106,20 @@ class ActorCriticNetwork(torch.nn.Module):
         return actor_loss, critic_loss
 
 
-def actor_critic(environment,
-        target_score,
-        networkclass,
-        hidden_size,
-        number_of_epoch,
-        actor_learning_rate,
-        critic_learning_rate,
-        discount_factor,
-        device,
-        record_path,
-        record_name,
-        record_frame,
-        writer):
+def actor_critic(
+    environment,
+    target_score,
+    networkclass,
+    hidden_size,
+    number_of_epoch,
+    actor_learning_rate,
+    critic_learning_rate,
+    discount_factor,
+    device,
+    record_path,
+    record_name,
+    record_frame,
+    writer):
 
     state_dimension = environment.observation_space.shape[0]
     action_dimension = environment.action_space.n
@@ -219,7 +220,7 @@ def actor_critic(environment,
 
 
 if __name__ == '__main__':
-    game = 'CartPole-v1'
+    game = 'LunarLander-v2'
     if not os.path.exists('./runs/'):
         os.makedirs('./runs/')
     torch.manual_seed(24)
@@ -227,10 +228,10 @@ if __name__ == '__main__':
     writer = SummaryWriter(log_dir=f'./runs/{game}_{time.strftime("%Y%m%d-%H%M%S")}')
 
     actor_critic(environment=gymnasium.make(game, render_mode='rgb_array'),
-            target_score=500,
+            target_score=120,
             networkclass=ActorCriticNetwork,
             hidden_size=64,
-            number_of_epoch=1000,
+            number_of_epoch=10000,
             actor_learning_rate=0.0005,
             critic_learning_rate=0.0005,
             discount_factor=0.999,

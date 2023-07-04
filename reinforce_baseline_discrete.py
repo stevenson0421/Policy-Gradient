@@ -131,18 +131,20 @@ class PolicyValueNetwork(torch.nn.Module):
         del self.values[:]
 
 
-def reinforce_baseline(environment,
-              networkclass,
-              hidden_size,
-              number_of_epoch,
-              learning_rate,
-              value_loss_ratio,
-              discount_factor,
-              device,
-              record_path,
-              record_name,
-              record_frame,
-              writer):
+def reinforce_baseline(
+    environment,
+    target_score,
+    networkclass,
+    hidden_size,
+    number_of_epoch,
+    learning_rate,
+    value_loss_ratio,
+    discount_factor,
+    device,
+    record_path,
+    record_name,
+    record_frame,
+    writer):
 
     state_dimension = environment.observation_space.shape[0]
     action_dimension = environment.action_space.n
@@ -191,7 +193,7 @@ def reinforce_baseline(environment,
                 
                 break
     
-        if np.mean(average_trajectory_reward) >= -100:
+        if np.mean(average_trajectory_reward) >= target_score:
             print(f'solved with {epoch} epochs')
             network.clear_memory()
             break
@@ -251,16 +253,17 @@ def reinforce_baseline(environment,
 
 
 if __name__ == '__main__':
-    game = 'Acrobot-v1'
+    game = 'LunarLander-v2'
     if not os.path.exists('./runs/'):
         os.makedirs('./runs/')
     writer = SummaryWriter(log_dir=f'./runs/{game}_{time.strftime("%Y%m%d-%H%M%S")}')
     torch.manual_seed(24)
     reinforce_baseline(environment=gymnasium.make(game, render_mode='rgb_array'),
+            target_score=120,
             networkclass=PolicyValueNetwork,
-            hidden_size=32,
-            number_of_epoch=1000,
-            learning_rate=0.005,
+            hidden_size=128,
+            number_of_epoch=10000,
+            learning_rate=0.001,
             value_loss_ratio=1,
             discount_factor=0.999,
             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
