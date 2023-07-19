@@ -13,6 +13,21 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 class ActorNetwork(torch.nn.Module):
+    '''
+    network approximation for actor (policy)
+
+    network structure:
+        fc
+        relu
+        fc
+        softmax
+
+    forward:
+        input:
+            state s
+        output:
+            policy pi
+    '''
     def __init__(self, state_dimension, action_dimension, hidden_size=16):
         super().__init__()
 
@@ -40,6 +55,20 @@ class ActorNetwork(torch.nn.Module):
 
 
 class CriticNetwork(torch.nn.Module):
+    '''
+    network approximation for critic (value)
+
+    network structure:
+        fc
+        relu
+        fc
+
+    forward:
+        input:
+            state s
+        output:
+            value V
+    '''
     def __init__(self, state_dimension, hidden_size=16):
         super().__init__()
 
@@ -64,6 +93,23 @@ class CriticNetwork(torch.nn.Module):
 
 
 class ActorCriticNetwork(torch.nn.Module):
+    '''
+    unified structure for actor (policy) and critic (value)
+
+    step:
+        input:
+            state s
+        output:
+            action a
+    update:
+        update agent parameters with single step
+        policy loss:
+            -log_pi(a_t|s_t) * (r_t + gamma * V(s_(t+1) - V(s_t)))
+        value loss:
+            (r_t + gamma * V(s_(t+1) - V(s_t))^2
+        input:
+            state s_t, next state s_(t+1), reward r_t, discount factor gamma
+    '''
     def __init__(self, state_dimension, action_dimension, actor_learning_rate, critic_learning_rate, hidden_size):
         super().__init__()
 
@@ -120,6 +166,36 @@ def actor_critic(
     record_name,
     record_frame,
     writer):
+    '''
+    main implementation of reinforce with baseline
+        input:
+            environment
+                environment for agent to interact with
+            target_score
+                the goal of agent. terminate after reaching this score
+            networkclass
+                class object of policy network
+            hidden_size
+                size of hidden layers of network
+            number_of_epoch
+                max epoch for training
+            actor_learning_rate
+                learning rate of actor (policy) network
+            critic_learning_rate
+                learning rate of critic (value) network
+            discount_factor
+                discount factor for calculating G_t
+            device
+                device for data and network
+            record_path
+                path to save video
+            record_name
+                name to save video
+            record_frame
+                frame of video
+            writer
+                tensorboard writer
+    '''
 
     state_dimension = environment.observation_space.shape[0]
     action_dimension = environment.action_space.n
@@ -132,6 +208,7 @@ def actor_critic(
 
     network.to(device)
 
+    # training
     start_time = time.time()
     average_trajectory_reward = deque(maxlen=100)
 
@@ -139,6 +216,7 @@ def actor_critic(
 
     for epoch in range(number_of_epoch):
 
+        # interaction + update
         state, info = environment.reset(seed=epoch)
 
         state = torch.from_numpy(state).float().to(device).unsqueeze(0)
@@ -156,6 +234,7 @@ def actor_critic(
             
             next_state = torch.from_numpy(next_state).float().to(device).unsqueeze(0)
 
+            # update agent
             actor_loss, critic_loss = network.update(state, next_state, reward, discount_factor, device)
 
             writer.add_scalar('Actor Loss', actor_loss, step)
@@ -182,7 +261,7 @@ def actor_critic(
     print(f'Train Time: {(time.time() - start_time):2f} seconds')
     print(f'Train Score: {np.mean(average_trajectory_reward)}')
 
-    
+    # testing
     trajectory_reward = 0
     trajectory_length = 0
     screens = []

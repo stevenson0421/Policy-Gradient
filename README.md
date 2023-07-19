@@ -62,7 +62,6 @@ Implementation of Policy Gradient
 
   - average reward of last 100 episodes reach 120 in 4892 epochs
 
-
 ## Advantage Actor Critic
 
 - CartPole-v1

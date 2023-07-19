@@ -13,6 +13,20 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 def discounted_cumulated_sum(sequence, discount_factor, device=None):
+    '''
+    calculate discounted cumulative sum of vector with discount factor
+    
+    input: 
+        vector x, discount factor gamma
+        [x0, 
+         x1, 
+         x2]
+
+    output:
+        [x0 + gamma * x1 + gamma^2 * x2,  
+         x1 + gamma * x2,
+         x2]
+    '''
     if isinstance(sequence, np.ndarray):
         return scipy.signal.lfilter([1], [1, float(-discount_factor)], sequence[::-1], axis=0)[::-1]
     elif isinstance(sequence, torch.Tensor):
@@ -22,6 +36,21 @@ def discounted_cumulated_sum(sequence, discount_factor, device=None):
 
 
 class PolicyNetwork(torch.nn.Module):
+    '''
+    network approximation for policy
+
+    network structure:
+        fc
+        relu
+        fc
+        softmax
+
+    forward:
+        input:
+            state s
+        output:
+            policy pi
+    '''
     def __init__(self, state_dimension, action_dimension, hidden_size=16):
         super().__init__()
 
@@ -49,6 +78,20 @@ class PolicyNetwork(torch.nn.Module):
 
 
 class ValueNetwork(torch.nn.Module):
+    '''
+    network approximation for value
+
+    network structure:
+        fc
+        relu
+        fc
+
+    forward:
+        input:
+            state s
+        output:
+            value V
+    '''
     def __init__(self, state_dimension, hidden_size=16):
         super().__init__()
 
@@ -78,6 +121,28 @@ class ValueNetwork(torch.nn.Module):
     
 
 class PolicyValueNetwork(torch.nn.Module):
+    '''
+    unified structure for policy and value
+
+    step:
+        input:
+            state s
+        output:
+            action a
+        store local:
+            log action probability log_pi(a, s), value V(s)
+    get_loss:
+        policy loss:
+            sum_t(log_pi(a_t|s_t) * (G_t - V(s)_t))
+        value loss:
+            mean_t(V_t - G_t)^2
+        input:
+            discount factor gamma
+        output:
+            loss L
+    clear memory:
+        clear local data (log action probability, reward)
+    '''
     def __init__(self, state_dimension, action_dimension, hidden_size=16):
         super().__init__()
 
@@ -116,11 +181,11 @@ class PolicyValueNetwork(torch.nn.Module):
 
         advantages = reward_to_go - values
 
-        # policy loss = sum of log pi(action_t|state_t) * (G_t - V_t) over t
+        # calculate policy loss
         policy_losses = [-a * b for a, b in zip(self.action_log_probs, advantages)]
         policy_loss = torch.cat(policy_losses).sum()
         
-        # value loss = 1/|T| * (G_t - V_t)^2
+        # calculate value loss
         value_loss = self.criterion(values, reward_to_go)
 
         return policy_loss, value_loss
@@ -145,6 +210,36 @@ def reinforce_baseline(
     record_name,
     record_frame,
     writer):
+    '''
+    main implementation of reinforce with baseline
+        input:
+            environment
+                environment for agent to interact with
+            target_score
+                the goal of agent. terminate after reaching this score
+            networkclass
+                class object of policy network
+            hidden_size
+                size of hidden layers of network
+            number_of_epoch
+                max epoch for training
+            learning_rate
+                learning rate of policy network
+            value_loss_ratio
+                ratio of value loss for unified agent training
+            discount_factor
+                discount factor for calculating G_t
+            device
+                device for data and network
+            record_path
+                path to save video
+            record_name
+                name to save video
+            record_frame
+                frame of video
+            writer
+                tensorboard writer
+    '''
 
     state_dimension = environment.observation_space.shape[0]
     action_dimension = environment.action_space.n
@@ -157,11 +252,13 @@ def reinforce_baseline(
     
     optimizer = torch.optim.Adam(network.parameters(), learning_rate)
 
+    # training
     start_time = time.time()
     average_trajectory_reward = deque(maxlen=100)
 
     for epoch in range(number_of_epoch):
 
+        # interaction
         state, info = environment.reset(seed=epoch)
 
         state = torch.from_numpy(state).to(device).unsqueeze(0)
@@ -177,7 +274,7 @@ def reinforce_baseline(
             trajectory_reward += reward
             trajectory_length += 1
 
-            # buffer.store(action_log_probability, reward)
+            # store reward to network
             network.rewards.append(reward)
             
             state = torch.from_numpy(next_state).to(device).unsqueeze(0)
@@ -197,7 +294,8 @@ def reinforce_baseline(
             print(f'solved with {epoch} epochs')
             network.clear_memory()
             break
-
+        
+        # update agent
         policy_loss, value_loss = network.get_loss(discount_factor, device)
         total_loss = policy_loss + value_loss_ratio * value_loss
 
@@ -216,6 +314,7 @@ def reinforce_baseline(
     print(f'Train Time: {(time.time() - start_time):2f} seconds')
     print(f'Train Score: {np.mean(average_trajectory_reward)}')
 
+    # testing
     trajectory_reward = 0
     trajectory_length = 0
     screens = []

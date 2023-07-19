@@ -13,6 +13,20 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 def discounted_cumulated_sum(sequence, discount_factor, device=None):
+    '''
+    calculate discounted cumulative sum of vector with discount factor
+    
+    input: 
+        vector x, discount factor gamma
+        [x0, 
+         x1, 
+         x2]
+
+    output:
+        [x0 + gamma * x1 + gamma^2 * x2,  
+         x1 + gamma * x2,
+         x2]
+    '''
     if isinstance(sequence, np.ndarray):
         return scipy.signal.lfilter([1], [1, float(-discount_factor)], sequence[::-1], axis=0)[::-1]
     elif isinstance(sequence, torch.Tensor):
@@ -22,6 +36,36 @@ def discounted_cumulated_sum(sequence, discount_factor, device=None):
 
 
 class PolicyNetwork(torch.nn.Module):
+    '''
+    network approximation for policy
+
+    network structure:
+        fc
+        relu
+        fc
+        softmax
+
+    forward:
+        input:
+            state s
+        output:
+            policy pi
+    step:
+        input:
+            state s
+        output:
+            action a
+        store local:
+            log action probability log_pi(a, s)
+    get_loss:
+        sum_t(log_pi(a_t|s_t) * G_t)
+        input:
+            discount factor gamma
+        output:
+            loss L
+    clear memory:
+        clear local data (log action probability, reward)
+    '''
     def __init__(self, state_dimension, action_dimension, hidden_size=16):
         super().__init__()
 
@@ -65,14 +109,12 @@ class PolicyNetwork(torch.nn.Module):
         reward_to_go = discounted_cumulated_sum(rewards, discount_factor, device)
         reward_to_go = (reward_to_go - reward_to_go.mean()) / reward_to_go.std()
 
-        # policy loss = sum of log pi(action_t|state_t) * G_t over t
         policy_losses = [-a * b for a, b in zip(self.action_log_probs, reward_to_go)]
         loss = torch.cat(policy_losses).sum()
 
         return loss
     
     def clear_memory(self):
-        # reset rewards and action buffer
         del self.action_log_probs[:]
         del self.rewards[:]
 
@@ -90,6 +132,34 @@ def reinforce(
     record_name,
     record_frame,
     writer):
+    '''
+    main implementation of reinforce
+        input:
+            environment
+                environment for agent to interact with
+            target_score
+                the goal of agent. terminate after reaching this score
+            networkclass
+                class object of policy network
+            hidden_size
+                size of hidden layers of network
+            number_of_epoch
+                max epoch for training
+            learning_rate
+                learning rate of policy network
+            discount_factor
+                discount factor for calculating G_t
+            device
+                device for data and network
+            record_path
+                path to save video
+            record_name
+                name to save video
+            record_frame
+                frame of video
+            writer
+                tensorboard writer
+    '''
 
     state_dimension = environment.observation_space.shape[0]
     action_dimension = environment.action_space.n
@@ -101,12 +171,14 @@ def reinforce(
     network.to(device)
     
     optimizer = torch.optim.Adam(network.parameters(), learning_rate)
-
+    
+    # training
     start_time = time.time()
     average_trajectory_reward = deque(maxlen=100)
-
+    
     for epoch in range(number_of_epoch):
-
+        
+        # interaction
         state, info = environment.reset(seed=epoch)
         state = torch.from_numpy(state).to(device).unsqueeze(0)
 
@@ -121,7 +193,7 @@ def reinforce(
             trajectory_reward += reward
             trajectory_length += 1
 
-            # buffer.store(action_log_probability, reward)
+            # store reward to network
             network.rewards.append(reward)
             
             state = torch.from_numpy(next_state).to(device).unsqueeze(0)
@@ -141,7 +213,8 @@ def reinforce(
             print(f'solved with {epoch} epochs')
             network.clear_memory()
             break
-
+        
+        # update agent
         loss = network.get_loss(discount_factor, device)
 
         writer.add_scalar('Policy Loss', loss, epoch)
@@ -157,6 +230,7 @@ def reinforce(
     print(f'Train Time: {(time.time() - start_time):2f} seconds')
     print(f'Train Score: {np.mean(average_trajectory_reward)}')
 
+    # testing
     trajectory_reward = 0
     trajectory_length = 0
     screens = []
